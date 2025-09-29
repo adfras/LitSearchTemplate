@@ -195,6 +195,7 @@ def _write_search_plan(
     near_window: int,
     extra_queries: Sequence[str],
     profile: str | None,
+    providers: Sequence[str] | None,
 ) -> Path:
     config = load_project_config(config_path)
     plan_path = config.search_plan
@@ -219,6 +220,17 @@ def _write_search_plan(
         if len(cleaned) >= 2:
             near_requirements.append({"terms": cleaned, "window": clean_window})
 
+    provider_list = [prov.strip().lower() for prov in providers or [] if prov.strip()]
+    if not provider_list:
+        provider_list = [
+            "openalex",
+            "crossref",
+            "semantic_scholar",
+            "core",
+            "arxiv",
+            "doaj",
+        ]
+
     plan = {
         "provider": "openalex",
         "queries": queries,
@@ -229,6 +241,7 @@ def _write_search_plan(
         "sleep": 0.5,
         "must_include": must_include,
         "must_include_near": near_requirements,
+        "providers": provider_list,
     }
     plan_path.parent.mkdir(parents=True, exist_ok=True)
     plan_path.write_text(json.dumps(plan, indent=2), encoding="utf-8")
@@ -329,6 +342,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Additional OpenAlex search string(s) to include alongside the generated ones.",
     )
     parser.add_argument(
+        "--providers",
+        nargs="+",
+        help="Which data providers to query (defaults to openalex, crossref, semantic_scholar, core, arxiv, doaj).",
+    )
+    parser.add_argument(
         "--serper-rounds",
         type=int,
         default=3,
@@ -353,6 +371,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         near_window=args.near_window,
         extra_queries=args.extra_query,
         profile=args.profile,
+        providers=args.providers,
     )
     print(f"Updated search plan at {plan_path}")
 

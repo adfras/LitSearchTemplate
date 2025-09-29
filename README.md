@@ -14,6 +14,12 @@ Everything ships with ASCII sanitisation, reproducible slugs, and audit-friendly
 - Python ≥ 3.10
 - [Serper](https://serper.dev) API key (set at runtime via `SERPER_API_KEY`)
 - Internet access for OpenAlex/Serper/doi.org
+- Optional provider keys:
+  - `CROSSREF_MAILTO` to identify yourself to Crossref
+  - `SEMANTIC_SCHOLAR_API_KEY` for higher Semantic Scholar quotas
+  - `CORE_API_KEY` for CORE search access
+  - `DOAJ_API_KEY` for authenticated DOAJ queries
+  - ArXiv access uses an HTTP User-Agent only (no key required)
 
 Optional:
 - `CROSSREF_MAILTO` ENV var to identify yourself to Crossref/doi.org
@@ -69,6 +75,7 @@ The orchestrator will:
 - Add `--require TERM` flags to force keywords into the title/abstract filter. When omitted, the script injects "virtual reality" if the topic contains it.
 - Use `--require-near TERM_A TERM_B` to keep only records where the two terms appear within `--near-window` characters (default 120) of one another in the title/abstract. Repeat the flag for multiple pairs.
 - Required keywords automatically seed focused OpenAlex queries (AND pairs and grouped clauses), so you don’t need to hand-write matching `--extra-query` strings for core concepts.
+- Supply `--providers openalex crossref semantic_scholar core arxiv doaj` (default) or a custom subset to control which free indexes contribute results.
 
 2. **Set bounds**
    - `--year-min`, `--year-max`, `--min-citations`, and `--top-n` mirror the JSON fields. CLI arguments win without permanently rewriting your custom plan.

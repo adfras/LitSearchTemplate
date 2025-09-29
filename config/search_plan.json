@@ -15,5 +15,14 @@
   "min_citations": 0,
   "top_n": 25,
   "sleep": 0.5,
-  "must_include": []
+  "must_include": [],
+  "must_include_near": [],
+  "providers": [
+    "openalex",
+    "crossref",
+    "semantic_scholar",
+    "core",
+    "arxiv",
+    "doaj"
+  ]
 }

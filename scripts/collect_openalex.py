@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
-"""Harvest OpenAlex search results into the project dataset."""
+"""Harvest scholarly search results into the project dataset."""
 from __future__ import annotations
 
 import argparse
 import csv
+import html
 import json
+import os
+import re
 import sys
 import time
+import unicodedata
+import xml.etree.ElementTree as ET
+from urllib.parse import quote_plus
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
 import requests
-import unicodedata
 
 
 try:  # Allow running as module or script
@@ -26,6 +31,12 @@ except ImportError:  # pragma: no cover - fallback for direct execution
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_SEARCH_PLAN = ROOT_DIR / "config" / "search_plan.json"
 OPENALEX_WORKS_ENDPOINT = "https://api.openalex.org/works"
+SEMANTIC_SCHOLAR_ENDPOINT = "https://api.semanticscholar.org/graph/v1/paper/search"
+CROSSREF_WORKS_ENDPOINT = "https://api.crossref.org/works"
+CORE_SEARCH_ENDPOINT = "https://core.ac.uk/api-v2/articles/search/"
+ARXIV_API_ENDPOINT = "http://export.arxiv.org/api/query"
+DOAJ_SEARCH_ENDPOINT = "https://doaj.org/api/search/articles/"
+SEMANTIC_SCHOLAR_MIN_INTERVAL = 3.2  # seconds between unauthenticated requests
 
 
 @dataclass
@@ -46,7 +57,7 @@ class NearRequirement:
 
 @dataclass
 class SearchPlan:
-    provider: str
+    providers: List[str]
     queries: List[SearchQuery]
     year_min: Optional[int]
     year_max: Optional[int]
@@ -59,7 +70,7 @@ class SearchPlan:
 
 @dataclass
 class Record:
-    openalex_id: str
+    record_id: str
     doi: Optional[str]
     doi_url: Optional[str]
     title: str
@@ -84,14 +95,64 @@ class OpenAlexError(RuntimeError):
     """Raised when the OpenAlex API returns an unexpected response."""
 
 
+def _strip_html_tags(value: str) -> str:
+    if not value:
+        return ""
+    return re.sub(r"<[^>]+>", " ", value)
+
+
+def _normalise_doi_value(doi: Optional[str]) -> Optional[str]:
+    if not doi:
+        return None
+    cleaned = doi.strip().lower()
+    prefix = "https://doi.org/"
+    if cleaned.startswith(prefix):
+        cleaned = cleaned[len(prefix) :]
+    return cleaned or None
+
+
+def _create_record(
+    record_id: str,
+    doi: Optional[str],
+    title: str,
+    year: Optional[int],
+    citations: int,
+    landing_page: Optional[str],
+    authors: Iterable[str],
+    abstract: str,
+    source_label: str,
+) -> Record:
+    doi_norm = _normalise_doi_value(doi)
+    doi_url = None
+    if doi_norm:
+        doi_url = f"https://doi.org/{doi_norm}"
+    author_list = [_sanitize_text(name) for name in authors if _sanitize_text(name)]
+    return Record(
+        record_id=record_id,
+        doi=doi_norm,
+        doi_url=doi_url,
+        title=_sanitize_text(title) or "untitled",
+        publication_year=year,
+        cited_by_count=max(0, citations),
+        landing_page_url=landing_page or doi_url,
+        authors=author_list,
+        abstract=_sanitize_text(abstract),
+        source_queries=[_sanitize_text(source_label) or source_label],
+    )
+
+
 def _load_search_plan(path: Path | None) -> SearchPlan:
     plan_path = (path or DEFAULT_SEARCH_PLAN).expanduser().resolve()
     if not plan_path.exists():
         raise FileNotFoundError(f"Search plan not found: {plan_path}")
     data = json.loads(plan_path.read_text(encoding="utf-8"))
-    provider = str(data.get("provider", "openalex"))
-    if provider.lower() != "openalex":
-        raise ValueError("Only the 'openalex' provider is currently supported.")
+    providers_raw = data.get("providers")
+    providers: List[str]
+    if isinstance(providers_raw, list) and providers_raw:
+        providers = [str(item).strip().lower() for item in providers_raw if str(item).strip()]
+    else:
+        provider = str(data.get("provider", "openalex")).strip().lower() or "openalex"
+        providers = [provider]
     raw_queries = data.get("queries")
     if not isinstance(raw_queries, list) or not raw_queries:
         raise ValueError("Search plan must include a non-empty 'queries' list.")
@@ -147,8 +208,10 @@ def _load_search_plan(path: Path | None) -> SearchPlan:
             continue
         window = max(0, int(window) or 0)
         must_include_near.append(NearRequirement(terms=cleaned, window=window))
+    if not providers:
+        providers = ["openalex"]
     return SearchPlan(
-        provider=provider,
+        providers=providers,
         queries=queries,
         year_min=int(year_min) if year_min is not None else None,
         year_max=int(year_max) if year_max is not None else None,
@@ -180,17 +243,11 @@ def _reconstruct_abstract(abstract_index: Optional[dict]) -> str:
 def _extract_record(raw: dict, label: str) -> Record:
     openalex_id = raw.get("id") or ""
     doi_value = raw.get("doi")
-    doi_url = None
-    if doi_value:
-        doi_value = doi_value.lower()
-        doi_url = doi_value if doi_value.startswith("http") else f"https://doi.org/{doi_value}"
     title = _sanitize_text(raw.get("display_name") or raw.get("title") or "untitled")
     year = raw.get("publication_year")
     cited_by = int(raw.get("cited_by_count") or 0)
     primary = raw.get("primary_location") or {}
     landing = primary.get("landing_page_url") or primary.get("source_url")
-    if not landing:
-        landing = doi_url
     authors = []
     for auth in raw.get("authorships") or []:
         name = _sanitize_text(auth.get("author", {}).get("display_name"))
@@ -199,18 +256,16 @@ def _extract_record(raw: dict, label: str) -> Record:
     abstract = raw.get("abstract")
     if not abstract:
         abstract = _reconstruct_abstract(raw.get("abstract_inverted_index"))
-    abstract = _sanitize_text(abstract)
-    return Record(
-        openalex_id=str(openalex_id),
-        doi=doi_value,
-        doi_url=doi_url,
+    return _create_record(
+        record_id=str(openalex_id) or f"openalex:{title}"[:100],
+        doi=doi_value.lower() if isinstance(doi_value, str) else None,
         title=title,
-        publication_year=int(year) if year is not None else None,
-        cited_by_count=cited_by,
-        landing_page_url=landing,
+        year=int(year) if year is not None else None,
+        citations=cited_by,
+        landing_page=landing,
         authors=authors,
-        abstract=abstract,
-        source_queries=[_sanitize_text(label)],
+        abstract=abstract or "",
+        source_label=f"openalex:{label}",
     )
 
 
@@ -226,7 +281,7 @@ def _request_openalex(params: Dict[str, str]) -> dict:
     return data
 
 
-def _fetch_query(plan: SearchPlan, query: SearchQuery) -> List[Record]:
+def _fetch_openalex(plan: SearchPlan, query: SearchQuery) -> List[Record]:
     params: Dict[str, str] = {
         "search": query.search,
         "per-page": str(query.per_page),
@@ -255,11 +310,386 @@ def _fetch_query(plan: SearchPlan, query: SearchQuery) -> List[Record]:
     return results
 
 
+def _fetch_crossref(plan: SearchPlan, query: SearchQuery) -> List[Record]:
+    mailto = os.environ.get("CROSSREF_MAILTO")
+    headers = {
+        "User-Agent": f"LitSearchTemplate/1.0 ({mailto})" if mailto else "LitSearchTemplate/1.0",
+    }
+    results: List[Record] = []
+    retrieved = 0
+    while retrieved < query.max_results:
+        rows = min(query.per_page, query.max_results - retrieved)
+        params = {
+            "query": query.search,
+            "rows": rows,
+            "offset": retrieved,
+            "select": "DOI,title,author,issued,abstract,is-referenced-by-count,URL",
+        }
+        filters: List[str] = []
+        if plan.year_min is not None:
+            filters.append(f"from-pub-date:{plan.year_min}-01-01")
+        if plan.year_max is not None:
+            filters.append(f"until-pub-date:{plan.year_max}-12-31")
+        if filters:
+            params["filter"] = ",".join(filters)
+        try:
+            response = requests.get(CROSSREF_WORKS_ENDPOINT, params=params, headers=headers, timeout=30)
+            response.raise_for_status()
+        except Exception as exc:  # noqa: BLE001
+            print(f"Crossref request failed for '{query.label}': {exc}")
+            break
+        payload = response.json()
+        items = payload.get("message", {}).get("items", [])
+        if not items:
+            break
+        for item in items:
+            title_values = item.get("title") or []
+            title = title_values[0] if title_values else ""
+            doi = item.get("DOI")
+            landing = item.get("URL")
+            year = None
+            date_parts = item.get("issued", {}).get("date-parts") or []
+            if date_parts and isinstance(date_parts[0], list) and date_parts[0]:
+                year = date_parts[0][0]
+            citations = int(item.get("is-referenced-by-count") or 0)
+            abstract_raw = item.get("abstract") or ""
+            abstract_text = html.unescape(_strip_html_tags(abstract_raw))
+            authors_raw = item.get("author") or []
+            authors = []
+            for person in authors_raw:
+                given = person.get("given") or ""
+                family = person.get("family") or ""
+                full = f"{given} {family}".strip()
+                if not full and person.get("name"):
+                    full = person.get("name")
+                if full:
+                    authors.append(full)
+            record_id = f"crossref:{doi.lower()}" if doi else f"crossref:{title[:50]}:{retrieved}"
+            results.append(
+                _create_record(
+                    record_id=record_id,
+                    doi=doi,
+                    title=title,
+                    year=int(year) if year else None,
+                    citations=citations,
+                    landing_page=landing,
+                    authors=authors,
+                    abstract=abstract_text,
+                    source_label=f"crossref:{query.label}",
+                )
+            )
+        retrieved += len(items)
+        if len(items) < rows:
+            break
+        if plan.sleep:
+            time.sleep(plan.sleep)
+    return results
+
+
+def _fetch_semantic_scholar(plan: SearchPlan, query: SearchQuery) -> List[Record]:
+    api_key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY")
+    headers = {
+        "User-Agent": "LitSearchTemplate/1.0",
+    }
+    if api_key:
+        headers["x-api-key"] = api_key
+    results: List[Record] = []
+    offset = 0
+    min_sleep = max(plan.sleep, 3.1)
+    last_request = getattr(_fetch_semantic_scholar, "_last_request", 0.0)
+    while offset < query.max_results:
+        limit = min(query.per_page, query.max_results - offset, 80)
+        params = {
+            "query": query.search,
+            "offset": offset,
+            "limit": limit,
+            "fields": "title,abstract,year,citationCount,externalIds,url,authors,openAccessPdf",
+        }
+        for attempt in range(3):
+            wait_for = SEMANTIC_SCHOLAR_MIN_INTERVAL - (time.time() - last_request)
+            if wait_for > 0:
+                time.sleep(wait_for)
+            try:
+                response = requests.get(SEMANTIC_SCHOLAR_ENDPOINT, params=params, headers=headers, timeout=30)
+                if response.status_code == 429:
+                    retry_after = response.headers.get("Retry-After")
+                    delay = float(retry_after) if retry_after and retry_after.isdigit() else 45.0
+                    print(f"Semantic Scholar rate limit hit for '{query.label}', skipping remaining pages (set SEMANTIC_SCHOLAR_API_KEY for higher quota).")
+                    last_request = time.time()
+                    _fetch_semantic_scholar._last_request = last_request
+                    return results
+                response.raise_for_status()
+                last_request = time.time()
+            except Exception as exc:  # noqa: BLE001
+                if attempt < 2:
+                    backoff = min_sleep * (attempt + 1)
+                    print(f"Semantic Scholar request error for '{query.label}' (attempt {attempt + 1}): {exc}; retrying in {backoff:.1f}s")
+                    time.sleep(backoff)
+                    continue
+                print(f"Semantic Scholar request failed for '{query.label}': {exc}")
+                _fetch_semantic_scholar._last_request = last_request
+                return results
+            break
+        else:
+            _fetch_semantic_scholar._last_request = last_request
+            return results
+        payload = response.json()
+        papers = payload.get("data") or []
+        if not papers:
+            break
+        for paper in papers:
+            title = paper.get("title") or ""
+            year = paper.get("year")
+            citations = int(paper.get("citationCount") or 0)
+            external_ids = paper.get("externalIds") or {}
+            doi = external_ids.get("DOI") or paper.get("doi")
+            url = None
+            if isinstance(paper.get("openAccessPdf"), dict):
+                url = paper["openAccessPdf"].get("url")
+            url = url or paper.get("url")
+            authors_raw = paper.get("authors") or []
+            authors = [author.get("name") for author in authors_raw if author.get("name")]
+            abstract = paper.get("abstract") or ""
+            record_id = paper.get("paperId") or f"semanticscholar:{doi or title[:50]}"
+            results.append(
+                _create_record(
+                    record_id=f"semanticscholar:{record_id}",
+                    doi=doi,
+                    title=title,
+                    year=int(year) if year else None,
+                    citations=citations,
+                    landing_page=url,
+                    authors=authors,
+                    abstract=abstract,
+                    source_label=f"semantic_scholar:{query.label}",
+                )
+            )
+        offset += len(papers)
+        # respect public rate limits by keeping only the first page without a key
+        break
+    _fetch_semantic_scholar._last_request = last_request
+    return results
+
+
+def _fetch_core(plan: SearchPlan, query: SearchQuery) -> List[Record]:
+    api_key = os.environ.get("CORE_API_KEY")
+    if not api_key:
+        print(f"Skipping CORE for '{query.label}' (CORE_API_KEY not set).")
+        return []
+    results: List[Record] = []
+    page = 1
+    fetched = 0
+    while fetched < query.max_results:
+        page_size = min(query.per_page, query.max_results - fetched, 100)
+        url = f"{CORE_SEARCH_ENDPOINT}{quote_plus(query.search)}"
+        params = {
+            "page": page,
+            "pageSize": page_size,
+            "apiKey": api_key,
+        }
+        try:
+            response = requests.get(url, params=params, timeout=30)
+            response.raise_for_status()
+        except Exception as exc:  # noqa: BLE001
+            print(f"CORE request failed for '{query.label}': {exc}")
+            break
+        payload = response.json()
+        items = payload.get("data") or []
+        if not items:
+            break
+        for item in items:
+            title = item.get("title") or ""
+            doi = item.get("doi")
+            landing = item.get("downloadUrl") or item.get("fulltextIdentifier")
+            year_raw = item.get("year") or item.get("datePublished")
+            year_int = None
+            if year_raw:
+                try:
+                    year_int = int(str(year_raw)[:4])
+                except ValueError:
+                    year_int = None
+            abstract = item.get("description") or ""
+            authors: List[str] = []
+            raw_authors = item.get("authors")
+            if isinstance(raw_authors, list):
+                for author in raw_authors:
+                    if isinstance(author, dict):
+                        name = author.get("name") or author.get("fullname")
+                        if name:
+                            authors.append(name)
+                    elif isinstance(author, str) and author.strip():
+                        authors.append(author.strip())
+            elif isinstance(raw_authors, str):
+                authors = [name.strip() for name in raw_authors.split(",") if name.strip()]
+            citations = int(item.get("citations") or 0)
+            record_id = item.get("id") or item.get("coreId") or f"core:{doi or title[:50]}"
+            results.append(
+                _create_record(
+                    record_id=f"core:{record_id}",
+                    doi=doi,
+                    title=title,
+                    year=year_int,
+                    citations=citations,
+                    landing_page=landing,
+                    authors=authors,
+                    abstract=abstract,
+                    source_label=f"core:{query.label}",
+                )
+            )
+        fetched += len(items)
+        if len(items) < page_size:
+            break
+        page += 1
+        if plan.sleep:
+            time.sleep(plan.sleep)
+    return results
+
+
+def _fetch_arxiv(plan: SearchPlan, query: SearchQuery) -> List[Record]:
+    headers = {"User-Agent": "LitSearchTemplate/1.0"}
+    results: List[Record] = []
+    start = 0
+    while start < query.max_results:
+        max_results = min(query.per_page, query.max_results - start, 100)
+        params = {
+            "search_query": f"all:{query.search}",
+            "start": start,
+            "max_results": max_results,
+        }
+        try:
+            response = requests.get(ARXIV_API_ENDPOINT, params=params, headers=headers, timeout=30)
+            response.raise_for_status()
+        except Exception as exc:  # noqa: BLE001
+            print(f"arXiv request failed for '{query.label}': {exc}")
+            break
+        try:
+            root = ET.fromstring(response.text)
+        except ET.ParseError as exc:
+            print(f"Failed to parse arXiv response for '{query.label}': {exc}")
+            break
+        ns = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
+        entries = root.findall("atom:entry", ns)
+        if not entries:
+            break
+        for entry in entries:
+            title = entry.findtext("atom:title", default="", namespaces=ns)
+            summary = entry.findtext("atom:summary", default="", namespaces=ns)
+            published = entry.findtext("atom:published", default="", namespaces=ns)
+            year = None
+            if published:
+                try:
+                    year = int(published[:4])
+                except ValueError:
+                    year = None
+            doi = entry.findtext("arxiv:doi", default="", namespaces=ns) or None
+            pdf_url = None
+            for link in entry.findall("atom:link", ns):
+                if link.get("type") == "application/pdf":
+                    pdf_url = link.get("href")
+                    break
+            authors = [author.findtext("atom:name", default="", namespaces=ns) for author in entry.findall("atom:author", ns)]
+            entry_id = entry.findtext("atom:id", default="", namespaces=ns) or f"arxiv:{title[:50]}"
+            results.append(
+                _create_record(
+                    record_id=f"arxiv:{entry_id}",
+                    doi=doi,
+                    title=title,
+                    year=year,
+                    citations=0,
+                    landing_page=pdf_url or entry_id,
+                    authors=authors,
+                    abstract=summary,
+                    source_label=f"arxiv:{query.label}",
+                )
+            )
+        start += len(entries)
+        if len(entries) < max_results:
+            break
+        if plan.sleep:
+            time.sleep(plan.sleep)
+    return results
+
+
+def _fetch_doaj(plan: SearchPlan, query: SearchQuery) -> List[Record]:
+    api_key = os.environ.get("DOAJ_API_KEY")
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    results: List[Record] = []
+    page = 1
+    fetched = 0
+    while fetched < query.max_results:
+        page_size = min(query.per_page, query.max_results - fetched, 100)
+        url = f"{DOAJ_SEARCH_ENDPOINT}{quote_plus(query.search)}"
+        params = {"page": page, "pageSize": page_size}
+        try:
+            response = requests.get(url, params=params, headers=headers, timeout=30)
+            response.raise_for_status()
+        except Exception as exc:  # noqa: BLE001
+            print(f"DOAJ request failed for '{query.label}': {exc}")
+            break
+        payload = response.json()
+        items = payload.get("results") or []
+        if not items:
+            break
+        for item in items:
+            bibjson = item.get("bibjson", {})
+            title = bibjson.get("title") or ""
+            abstract = bibjson.get("abstract") or ""
+            doi = None
+            for identifier in bibjson.get("identifier", []):
+                if identifier.get("type") == "doi" and identifier.get("id"):
+                    doi = identifier.get("id")
+                    break
+            year = bibjson.get("year")
+            try:
+                year_int = int(year) if year else None
+            except ValueError:
+                year_int = None
+            authors = [author.get("name") for author in bibjson.get("author", []) if author.get("name")]
+            landing = None
+            for link in bibjson.get("link", []):
+                if link.get("type") == "fulltext" or not landing:
+                    landing = link.get("url")
+            record_id = item.get("id") or f"doaj:{doi or title[:50]}"
+            results.append(
+                _create_record(
+                    record_id=f"doaj:{record_id}",
+                    doi=doi,
+                    title=title,
+                    year=year_int,
+                    citations=0,
+                    landing_page=landing,
+                    authors=authors,
+                    abstract=abstract,
+                    source_label=f"doaj:{query.label}",
+                )
+            )
+        fetched += len(items)
+        if len(items) < page_size:
+            break
+        page += 1
+        if plan.sleep:
+            time.sleep(plan.sleep)
+    return results
+
+
+PROVIDER_FETCHERS = {
+    "openalex": _fetch_openalex,
+    "crossref": _fetch_crossref,
+    "semantic_scholar": _fetch_semantic_scholar,
+    "semanticscholar": _fetch_semantic_scholar,
+    "core": _fetch_core,
+    "arxiv": _fetch_arxiv,
+    "doaj": _fetch_doaj,
+}
+
+
 def _deduplicate(records: Iterable[Record]) -> List[Record]:
     merged: Dict[str, Record] = {}
     for record in records:
-        key = record.doi or record.openalex_id
-        key = key.lower() if isinstance(key, str) else record.openalex_id
+        key = record.doi or record.record_id
+        key = key.lower() if isinstance(key, str) else record.record_id
         existing = merged.get(key)
         if existing:
             combined_queries = sorted(set(existing.source_queries + record.source_queries))
@@ -391,7 +821,7 @@ def _write_csv(path: Path, records: List[Record]) -> None:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Harvest OpenAlex results and rebuild the dataset CSV.",
+        description="Harvest literature results from configured providers and rebuild the dataset CSV.",
     )
     parser.add_argument(
         "--config",
@@ -444,10 +874,16 @@ def main() -> int:
 
     all_records: List[Record] = []
     for query in plan.queries:
-        print(f"Querying OpenAlex for '{query.label}' ...")
-        fetched = _fetch_query(plan, query)
-        print(f"  Retrieved {len(fetched)} records.")
-        all_records.extend(fetched)
+        for provider in plan.providers:
+            provider_key = provider.strip().lower()
+            fetcher = PROVIDER_FETCHERS.get(provider_key)
+            if not fetcher:
+                print(f"Skipping unsupported provider '{provider}'.")
+                continue
+            print(f"Querying {provider_key} for '{query.label}' ...")
+            fetched = fetcher(plan, query)
+            print(f"  Retrieved {len(fetched)} records.")
+            all_records.extend(fetched)
 
     if not all_records:
         print("No records retrieved; aborting.")
@@ -460,7 +896,7 @@ def main() -> int:
         candidates_path,
         [
             {
-                "openalex_id": record.openalex_id,
+                "record_id": record.record_id,
                 "doi": record.doi,
                 "doi_url": record.doi_url,
                 "title": record.title,
@@ -483,7 +919,7 @@ def main() -> int:
         dedup_path,
         [
             {
-                "openalex_id": record.openalex_id,
+                "record_id": record.record_id,
                 "doi": record.doi,
                 "doi_url": record.doi_url,
                 "title": record.title,
