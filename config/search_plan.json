@@ -2,36 +2,18 @@
   "provider": "openalex",
   "queries": [
     {
-      "label": "vr-social-indivdiff",
-      "search": "\"virtual reality\" \"social interaction\" \"individual difference\"",
+      "label": "example",
+      "search": "\"example topic\"",
       "filters": "type:article,language:en",
       "sort": "cited_by_count:desc",
-      "per_page": 200,
-      "max_results": 200
-    },
-    {
-      "label": "social-vr-personality",
-      "search": "\"social virtual reality\" (personality OR trait OR \"individual differences\")",
-      "filters": "type:article,language:en",
-      "sort": "relevance_score:desc",
-      "per_page": 200,
-      "max_results": 200
-    },
-    {
-      "label": "vr-social-presence",
-      "search": "\"virtual reality\" \"social presence\" personality",
-      "filters": "type:article,language:en",
-      "sort": "relevance_score:desc",
-      "per_page": 200,
-      "max_results": 200
+      "per_page": 25,
+      "max_results": 25
     }
   ],
   "year_min": 2018,
   "year_max": 2025,
-  "min_citations": 5,
-  "top_n": 150,
+  "min_citations": 0,
+  "top_n": 25,
   "sleep": 0.5,
-  "must_include": [
-    "virtual reality"
-  ]
+  "must_include": []
 }
