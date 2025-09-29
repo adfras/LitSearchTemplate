@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import itertools
 import json
 import subprocess
 import sys
@@ -89,9 +90,25 @@ def _count_missing(rows: Iterable[dict]) -> int:
     return sum(1 for row in rows if (row.get("Full Text Status") or "").lower() != "downloaded")
 
 
-def _generate_queries(topic: str, extra_queries: Sequence[str], profile: str | None) -> List[dict]:
+def _generate_queries(
+    topic: str,
+    extra_queries: Sequence[str],
+    profile: str | None,
+    required_terms: Sequence[str],
+    required_near: Sequence[Sequence[str]],
+) -> List[dict]:
     if profile and profile in PROFILES:
         return PROFILES[profile]
+
+    def _prepare_terms(terms: Sequence[str]) -> List[str]:
+        prepared: List[str] = []
+        for term in terms:
+            cleaned = term.strip()
+            if not cleaned:
+                continue
+            prepared.append(f'"{cleaned}"' if any(ch.isspace() for ch in cleaned) else cleaned)
+        return prepared
+
     cleaned = topic.strip()
     lowered = cleaned.lower()
     if all(keyword in lowered for keyword in ("virtual reality", "social", "individual", "difference")):
@@ -131,11 +148,34 @@ def _generate_queries(topic: str, extra_queries: Sequence[str], profile: str | N
         label = f"extra-{index}"
         add_query(label, query, "relevance_score:desc")
 
+    required_tokens = _prepare_terms(required_terms)
+    if required_tokens:
+        add_query("required-all", " ".join(required_tokens), "relevance_score:desc")
+        if len(required_tokens) > 1:
+            add_query("required-and", " AND ".join(required_tokens), "relevance_score:desc")
+            if len(required_tokens) > 2:
+                for combo_index, combo in enumerate(itertools.combinations(required_tokens, 2), start=1):
+                    add_query(
+                        f"required-pair-{combo_index}",
+                        " AND ".join(combo),
+                        "relevance_score:desc",
+                    )
+
+    for idx, requirement in enumerate(required_near, start=1):
+        near_tokens = _prepare_terms(requirement)
+        if len(near_tokens) >= 2:
+            add_query(
+                f"near-{idx}",
+                " AND ".join(near_tokens),
+                "relevance_score:desc",
+            )
+
     # De-duplicate while keeping order
     unique = []
     seen = set()
     for entry in queries:
-        key = json.dumps(entry, sort_keys=True)
+        key_data = {k: entry[k] for k in entry if k != "label"}
+        key = json.dumps(key_data, sort_keys=True)
         if key in seen:
             continue
         seen.add(key)
@@ -151,18 +191,33 @@ def _write_search_plan(
     min_citations: int,
     top_n: int | None,
     required_terms: Sequence[str],
+    required_near: Sequence[Sequence[str]],
+    near_window: int,
     extra_queries: Sequence[str],
     profile: str | None,
 ) -> Path:
     config = load_project_config(config_path)
     plan_path = config.search_plan
-    queries = _generate_queries(topic, extra_queries, profile)
+    queries = _generate_queries(
+        topic,
+        extra_queries,
+        profile,
+        required_terms,
+        required_near,
+    )
     if not queries:
         raise ValueError("No queries generated; supply topic or --extra-query.")
 
     must_include = [term.strip().lower() for term in required_terms if term.strip()]
     if not must_include and "virtual reality" in topic.lower():
         must_include = ["virtual reality"]
+
+    near_requirements = []
+    clean_window = max(0, near_window)
+    for requirement in required_near:
+        cleaned = [term.strip().lower() for term in requirement if term.strip()]
+        if len(cleaned) >= 2:
+            near_requirements.append({"terms": cleaned, "window": clean_window})
 
     plan = {
         "provider": "openalex",
@@ -173,6 +228,7 @@ def _write_search_plan(
         "top_n": top_n,
         "sleep": 0.5,
         "must_include": must_include,
+        "must_include_near": near_requirements,
     }
     plan_path.parent.mkdir(parents=True, exist_ok=True)
     plan_path.write_text(json.dumps(plan, indent=2), encoding="utf-8")
@@ -248,6 +304,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Keyword that must appear in title/abstract (can be supplied multiple times).",
     )
     parser.add_argument(
+        "--require-near",
+        action="append",
+        nargs=2,
+        metavar=("TERM_A", "TERM_B"),
+        default=[],
+        help="Ensure the given pair of terms appear within the proximity window in title/abstract (repeatable).",
+    )
+    parser.add_argument(
+        "--near-window",
+        type=int,
+        default=120,
+        help="Maximum character span for --require-near matches (0 disables the proximity constraint).",
+    )
+    parser.add_argument(
         "--profile",
         choices=sorted(PROFILES.keys()),
         help="Optional pre-defined query template to use.",
@@ -279,6 +349,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         min_citations=args.min_citations,
         top_n=top_n,
         required_terms=args.require,
+        required_near=args.require_near,
+        near_window=args.near_window,
         extra_queries=args.extra_query,
         profile=args.profile,
     )

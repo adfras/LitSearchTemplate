@@ -66,7 +66,9 @@ The orchestrator will:
 
 1. **Choose a profile or edit the plan**
    - Use the built-in `--profile social-vr-individual-diff` or supply your own topic; the orchestrator will auto-generate sensible OpenAlex queries (or you can edit `config/search_plan.json` directly).
-   - Add `--require TERM` flags to force keywords into the title/abstract filter. When omitted, the script injects "virtual reality" if the topic contains it.
+- Add `--require TERM` flags to force keywords into the title/abstract filter. When omitted, the script injects "virtual reality" if the topic contains it.
+- Use `--require-near TERM_A TERM_B` to keep only records where the two terms appear within `--near-window` characters (default 120) of one another in the title/abstract. Repeat the flag for multiple pairs.
+- Required keywords automatically seed focused OpenAlex queries (AND pairs and grouped clauses), so you don’t need to hand-write matching `--extra-query` strings for core concepts.
 
 2. **Set bounds**
    - `--year-min`, `--year-max`, `--min-citations`, and `--top-n` mirror the JSON fields. CLI arguments win without permanently rewriting your custom plan.

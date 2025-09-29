@@ -39,6 +39,12 @@ class SearchQuery:
 
 
 @dataclass
+class NearRequirement:
+    terms: List[str]
+    window: int
+
+
+@dataclass
 class SearchPlan:
     provider: str
     queries: List[SearchQuery]
@@ -48,6 +54,7 @@ class SearchPlan:
     top_n: Optional[int]
     sleep: float
     must_include: List[str]
+    must_include_near: List[NearRequirement]
 
 
 @dataclass
@@ -121,6 +128,25 @@ def _load_search_plan(path: Path | None) -> SearchPlan:
     sleep = float(data.get("sleep") or 0.5)
     must_include_raw = data.get("must_include") or []
     must_include = [str(term).strip().lower() for term in must_include_raw if str(term).strip()]
+
+    near_raw = data.get("must_include_near") or []
+    must_include_near: List[NearRequirement] = []
+    for entry in near_raw:
+        if isinstance(entry, dict):
+            raw_terms = entry.get("terms")
+            window = int(entry.get("window") or 0)
+        else:
+            raw_terms = entry
+            window = 0
+        if isinstance(raw_terms, str):
+            terms = [raw_terms]
+        else:
+            terms = list(raw_terms) if isinstance(raw_terms, (list, tuple)) else []
+        cleaned = [str(term).strip().lower() for term in terms if str(term).strip()]
+        if len(cleaned) < 2:
+            continue
+        window = max(0, int(window) or 0)
+        must_include_near.append(NearRequirement(terms=cleaned, window=window))
     return SearchPlan(
         provider=provider,
         queries=queries,
@@ -130,6 +156,7 @@ def _load_search_plan(path: Path | None) -> SearchPlan:
         top_n=top_n,
         sleep=max(0.0, sleep),
         must_include=must_include,
+        must_include_near=must_include_near,
     )
 
 
@@ -250,6 +277,47 @@ def _deduplicate(records: Iterable[Record]) -> List[Record]:
     return list(merged.values())
 
 
+def _find_term_positions(text: str, term: str) -> List[int]:
+    positions: List[int] = []
+    start = 0
+    while True:
+        index = text.find(term, start)
+        if index == -1:
+            break
+        positions.append(index)
+        start = index + max(1, len(term))
+    return positions
+
+
+def _matches_near_requirement(text: str, requirement: NearRequirement) -> bool:
+    terms = requirement.terms
+    if not terms:
+        return True
+    occurrences: List[tuple[int, str]] = []
+    for term in terms:
+        positions = _find_term_positions(text, term)
+        if not positions:
+            return False
+        occurrences.extend((position, term) for position in positions)
+    occurrences.sort(key=lambda item: item[0])
+    counts = {term: 0 for term in terms}
+    left = 0
+    for right, (position, term) in enumerate(occurrences):
+        counts[term] += 1
+        while all(count > 0 for count in counts.values()) and left <= right:
+            span = occurrences[right][0] - occurrences[left][0]
+            if requirement.window <= 0 or span <= requirement.window:
+                return True
+            left_term = occurrences[left][1]
+            counts[left_term] -= 1
+            left += 1
+    return False
+
+
+def _satisfies_near_requirements(text: str, requirements: List[NearRequirement]) -> bool:
+    return all(_matches_near_requirement(text, requirement) for requirement in requirements)
+
+
 def _apply_filters(plan: SearchPlan, records: Iterable[Record]) -> List[Record]:
     filtered: List[Record] = []
     for record in records:
@@ -262,6 +330,10 @@ def _apply_filters(plan: SearchPlan, records: Iterable[Record]) -> List[Record]:
         if plan.must_include:
             haystack = f"{record.title} {record.abstract}".lower()
             if not all(term in haystack for term in plan.must_include):
+                continue
+        if plan.must_include_near:
+            haystack = f"{record.title} {record.abstract}".lower()
+            if not _satisfies_near_requirements(haystack, plan.must_include_near):
                 continue
         filtered.append(record)
     return filtered
