@@ -1,0 +1,18 @@
+{
+  "csv_path": "data/processed/library.csv",
+  "full_text_dir": "data/full_text",
+  "columns": {
+    "doi": "DOI",
+    "title": "Title",
+    "status": "Full Text Status",
+    "path": "Full Text Path",
+    "notes": "Full Text Notes"
+  },
+  "open_access_sources": "config/open_access_sources.json",
+  "references": {
+    "bib": "data/processed/library.bib",
+    "ris": "data/processed/library.ris",
+    "log": "data/processed/fetch_references.log"
+  },
+  "search_plan": "config/search_plan.json"
+}
