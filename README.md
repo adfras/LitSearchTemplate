@@ -2,7 +2,7 @@
 
 Reusable tooling for harvesting, downloading, and citing literature for **any** research topic. The project abstracts the bespoke “Bayesian avatars” workflow into a configuration-driven engine that you can run end-to-end with a single command.
 
-- **Harvester**: Pulls ranked candidates from OpenAlex using configurable query plans.
+- **Harvester**: Pulls ranked candidates from OpenAlex, Google Scholar (via Serper), and other configured providers using configurable query plans.
 - **Downloader**: Grabs deterministic open-access PDFs first, then fans out through Serper-driven search + scraping (no credentials stored in the repo).
 - **Citations**: Exports BibTeX/RIS for every DOI in the dataset.
 - **Orchestrator**: `python -m scripts.run_pipeline` updates the search plan, executes all stages, and prints a diff against the previous run.
@@ -12,7 +12,8 @@ Everything ships with ASCII sanitisation, reproducible slugs, and audit-friendly
 ## Requirements
 
 - Python ≥ 3.10
-- [Serper](https://serper.dev) API key (set at runtime via `SERPER_API_KEY`)
+- [Serper](https://serper.dev) API key (set at runtime via `SERPER_API_KEY`, used for Google Scholar harvesting and PDF discovery)
+  - Optional: `SERPER_SCHOLAR_MAX_PAGES` (default 5) to let the Google Scholar stage walk multiple result pages
 - Internet access for OpenAlex/Serper/doi.org
 - Optional provider keys:
   - `CROSSREF_MAILTO` to identify yourself to Crossref
@@ -38,7 +39,7 @@ python -m scripts.run_pipeline "individual differences for virtual reality socia
 
 The orchestrator will:
 1. Regenerate `config/search_plan.json` (unless you point it at a custom profile/plan).
-2. Harvest OpenAlex results and write the dataset to `data/processed/library.csv`.
+2. Harvest OpenAlex/Google Scholar results (plus any extra providers) and write the dataset to `data/processed/library.csv`.
 3. Attempt deterministic and Serper-assisted PDF downloads (`data/full_text/`, ignored by git).
 4. Export BibTeX + RIS to `data/processed/`.
 5. Print a summary highlighting new/removed DOIs and full-text coverage.
@@ -56,7 +57,7 @@ The orchestrator will:
 │   └── raw/                      # place to stash upstream responses if needed
 ├── scripts/
 │   ├── common.py                 # config helpers, path utilities, ASCII slug/normalisation
-│   ├── collect_openalex.py       # harvest OpenAlex using the active search plan
+│   ├── collect_openalex.py       # harvest OpenAlex/Google Scholar/etc. using the active search plan
 │   ├── download_open_pdfs.py     # grab deterministic PDFs from the DOI→URL map
 │   ├── serper_download_pdfs.py   # discover missing PDFs through Serper + scraping
 │   ├── fetch_references.py       # export BibTeX + RIS using doi.org / Crossref
@@ -75,7 +76,7 @@ The orchestrator will:
 - Add `--require TERM` flags to force keywords into the title/abstract filter. When omitted, the script injects "virtual reality" if the topic contains it.
 - Use `--require-near TERM_A TERM_B` to keep only records where the two terms appear within `--near-window` characters (default 120) of one another in the title/abstract. Repeat the flag for multiple pairs.
 - Required keywords automatically seed focused OpenAlex queries (AND pairs and grouped clauses), so you don’t need to hand-write matching `--extra-query` strings for core concepts.
-- Supply `--providers openalex crossref semantic_scholar core arxiv doaj` (default) or a custom subset to control which free indexes contribute results.
+- Supply `--providers openalex crossref semantic_scholar serper_scholar core arxiv doaj` (default) or a custom subset to control which free indexes contribute results. When relying on Google Scholar only, combine `--providers serper_scholar` with extra queries to keep `query.max_results` fed while pagination walks additional pages.
 
 2. **Set bounds**
    - `--year-min`, `--year-max`, `--min-citations`, and `--top-n` mirror the JSON fields. CLI arguments win without permanently rewriting your custom plan.

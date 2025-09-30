@@ -226,6 +226,7 @@ def _write_search_plan(
             "openalex",
             "crossref",
             "semantic_scholar",
+            "serper_scholar",
             "core",
             "arxiv",
             "doaj",
@@ -344,7 +345,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--providers",
         nargs="+",
-        help="Which data providers to query (defaults to openalex, crossref, semantic_scholar, core, arxiv, doaj).",
+        help=(
+            "Which data providers to query (defaults to openalex, crossref, "
+            "semantic_scholar, serper_scholar, core, arxiv, doaj)."
+        ),
     )
     parser.add_argument(
         "--serper-rounds",

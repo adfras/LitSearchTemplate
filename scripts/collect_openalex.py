@@ -32,6 +32,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_SEARCH_PLAN = ROOT_DIR / "config" / "search_plan.json"
 OPENALEX_WORKS_ENDPOINT = "https://api.openalex.org/works"
 SEMANTIC_SCHOLAR_ENDPOINT = "https://api.semanticscholar.org/graph/v1/paper/search"
+SERPER_SCHOLAR_ENDPOINT = "https://google.serper.dev/scholar"
 CROSSREF_WORKS_ENDPOINT = "https://api.crossref.org/works"
 CORE_SEARCH_ENDPOINT = "https://core.ac.uk/api-v2/articles/search/"
 ARXIV_API_ENDPOINT = "http://export.arxiv.org/api/query"
@@ -471,6 +472,148 @@ def _fetch_semantic_scholar(plan: SearchPlan, query: SearchQuery) -> List[Record
     return results
 
 
+def _fetch_serper_scholar(plan: SearchPlan, query: SearchQuery) -> List[Record]:
+    api_key = os.environ.get("SERPER_API_KEY")
+    if not api_key:
+        print(f"Skipping Serper Scholar for '{query.label}' (SERPER_API_KEY not set).")
+        return []
+
+    per_page = max(1, min(query.per_page, 20))
+    payload_base = {
+        "q": query.search,
+        "num": per_page,
+    }
+    headers = {
+        "X-API-KEY": api_key,
+        "Content-Type": "application/json",
+    }
+
+    results: List[Record] = []
+    seen_ids: set[str] = set()
+    max_pages_env = int(os.getenv("SERPER_SCHOLAR_MAX_PAGES", "5"))
+    max_pages = max(1, max_pages_env)
+
+    doi_pattern = re.compile(r"10\.\d{4,9}/[-._;()/:A-Z0-9]+", re.IGNORECASE)
+    year_pattern = re.compile(r"(19|20)\d{2}")
+
+    def _extract_doi(*values: Optional[str]) -> Optional[str]:
+        for value in values:
+            if not value or not isinstance(value, str):
+                continue
+            match = doi_pattern.search(value)
+            if match:
+                return match.group(0).lower()
+        return None
+
+    def _extract_year(*values: Optional[str]) -> Optional[int]:
+        for value in values:
+            if not value or not isinstance(value, str):
+                continue
+            match = year_pattern.search(value)
+            if match:
+                try:
+                    return int(match.group(0))
+                except ValueError:
+                    continue
+        return None
+
+    fetched = 0
+    page = 1
+    while fetched < query.max_results and page <= max_pages:
+        payload = dict(payload_base)
+        if page > 1:
+            payload["page"] = page
+        try:
+            response = requests.post(SERPER_SCHOLAR_ENDPOINT, json=payload, headers=headers, timeout=30)
+            response.raise_for_status()
+        except Exception as exc:  # noqa: BLE001
+            print(f"Serper Scholar request failed for '{query.label}' (page {page}): {exc}")
+            break
+
+        data = response.json()
+        organic = data.get("organic")
+        if not isinstance(organic, list) or not organic:
+            if page == 1:
+                print(f"Serper Scholar returned no results for '{query.label}'.")
+            break
+
+        page_new = 0
+        for entry in organic:
+            if fetched >= query.max_results:
+                break
+            if not isinstance(entry, dict):
+                continue
+            record_id_raw = entry.get("resultId") or entry.get("link") or entry.get("pdf")
+            if record_id_raw and record_id_raw in seen_ids:
+                continue
+
+            title = entry.get("title") or ""
+            link = entry.get("link") or entry.get("pdf") or ""
+            snippet = entry.get("snippet") or entry.get("description") or ""
+            publication_info = entry.get("publicationInfo") or ""
+            inline_links = entry.get("inlineLinks") if isinstance(entry.get("inlineLinks"), dict) else {}
+            cited_by_total = inline_links.get("citedBy", {}).get("total") if inline_links else None
+
+            doi = _extract_doi(link, snippet, publication_info)
+
+            year = entry.get("year")
+            if isinstance(year, str) and year.isdigit():
+                year = int(year)
+            elif isinstance(year, int):
+                year = year
+            else:
+                year = _extract_year(publication_info, snippet)
+
+            authors: List[str] = []
+            authors_raw = entry.get("authors")
+            if isinstance(authors_raw, list):
+                for item in authors_raw:
+                    if isinstance(item, dict):
+                        name = item.get("name")
+                    else:
+                        name = str(item)
+                    if name and name.strip():
+                        authors.append(name.strip())
+            if not authors and isinstance(publication_info, str):
+                author_part = publication_info.split(" - ", 1)[0]
+                if author_part and not year_pattern.search(author_part):
+                    potential = re.split(r",|·| and ", author_part)
+                    authors = [name.strip() for name in potential if name.strip()]
+
+            cited_by = 0
+            if cited_by_total is not None:
+                try:
+                    cited_by = int(str(cited_by_total).replace(",", ""))
+                except ValueError:
+                    cited_by = 0
+
+            if record_id_raw:
+                seen_ids.add(record_id_raw)
+            record_id = record_id_raw or f"serper:{title[:80]}:{page}"
+            record = _create_record(
+                record_id=f"serper:{record_id}",
+                doi=doi,
+                title=title,
+                year=year,
+                citations=cited_by,
+                landing_page=link,
+                authors=authors,
+                abstract=snippet,
+                source_label=f"serper_scholar:{query.label}",
+            )
+            results.append(record)
+            fetched += 1
+            page_new += 1
+
+        if page_new == 0:
+            break
+        page += 1
+        if plan.sleep:
+            time.sleep(plan.sleep)
+
+    return results
+
+
 def _fetch_core(plan: SearchPlan, query: SearchQuery) -> List[Record]:
     api_key = os.environ.get("CORE_API_KEY")
     if not api_key:
@@ -679,6 +822,8 @@ PROVIDER_FETCHERS = {
     "crossref": _fetch_crossref,
     "semantic_scholar": _fetch_semantic_scholar,
     "semanticscholar": _fetch_semantic_scholar,
+    "serper_scholar": _fetch_serper_scholar,
+    "serper": _fetch_serper_scholar,
     "core": _fetch_core,
     "arxiv": _fetch_arxiv,
     "doaj": _fetch_doaj,
