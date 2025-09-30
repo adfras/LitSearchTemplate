@@ -110,7 +110,7 @@ Use `--dry-run` on the downloader scripts to preview actions without writing fil
 
 - **Serper 403s** – Ensure `SERPER_API_KEY` is set; you can limit workload with `SERPER_MAX_ROWS` or the orchestrator’s `--serper-rounds`.
 - **Manual PDFs** – If some hosts require logins, obtain the PDF manually and drop it into `data/full_text/`. Re-run the downloaders to update the CSV metadata; any direct PDF links detected from provider metadata will now be attempted automatically before Serper searches.
-- **LLM Verification** – Use `python3 -m scripts.verify_full_text "your topic"` (after exporting `OPENAI_API_KEY`) to let GPT-4o sanity-check downloaded PDFs. Results are stored in `Verification Status` / `Verification Notes` columns so you can quarantine off-topic files.
+- **LLM Verification** – Use `python3 -m scripts.verify_full_text "your topic"` (after exporting `OPENAI_API_KEY`) to let `gpt-5-chat-latest` sanity-check downloaded PDFs (override with `--model` if you prefer a different snapshot). Results are stored in `Verification Status` / `Verification Notes` columns so you can quarantine off-topic files.
 - **Profiles** – Add new templates to `PROFILES` in `scripts/run_pipeline.py` for frequently used queries/topics.
 - **ASCII cleanliness** – Titles/abstracts are normalised to plain ASCII in `collect_openalex.py` to avoid mojibake in downstream tools.
 

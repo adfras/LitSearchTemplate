@@ -19,7 +19,7 @@ except ImportError:  # pragma: no cover
     from common import load_project_config  # type: ignore
 
 
-DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_MODEL = "gpt-5-chat-latest"
 MAX_EXCERPT_CHARS = 6000
 PAGES_TO_SAMPLE = 12
 VERIFICATION_FIELD = "Verification Status"
