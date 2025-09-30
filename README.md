@@ -1,6 +1,6 @@
 # Generalised Scholarly Search Pipeline
 
-Reusable tooling for harvesting, downloading, and citing literature for **any** research topic. The project abstracts the bespoke “Bayesian avatars” workflow into a configuration-driven engine that you can run end-to-end with a single command.
+Reusable tooling for harvesting, downloading, and citing literature for **any** research topic. The project wraps a configurable multi-provider search workflow into an engine you can run end-to-end with a single command.
 
 - **Harvester**: Pulls ranked candidates from OpenAlex, Google Scholar (via Serper), and other configured providers using configurable query plans.
 - **Downloader**: Grabs deterministic open-access PDFs and any direct links surfaced by OpenAlex/arXiv metadata before fanning out through Serper-driven search + scraping (no credentials stored in the repo).
@@ -30,11 +30,10 @@ Optional:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt  # or pip install requests pandas
+pip install -r requirements.txt
 
 export SERPER_API_KEY=your-serper-token
-python -m scripts.run_pipeline "individual differences for virtual reality social interactions" \
-  --profile social-vr-individual-diff --year-min 2018 --year-max 2025
+python -m scripts.run_pipeline "example research question" --year-min 2018 --year-max 2025
 ```
 
 The orchestrator will:
@@ -72,8 +71,8 @@ The orchestrator will:
 ## Configuring a Search
 
 1. **Choose a profile or edit the plan**
-   - Use the built-in `--profile social-vr-individual-diff` or supply your own topic; the orchestrator will auto-generate sensible OpenAlex queries (or you can edit `config/search_plan.json` directly).
-- Add `--require TERM` flags to force keywords into the title/abstract filter. When omitted, the script injects "virtual reality" if the topic contains it.
+   - Use one of the provided profiles or supply your own topic; the orchestrator will auto-generate sensible OpenAlex queries (or you can edit `config/search_plan.json` directly).
+- Add `--require TERM` flags to force keywords into the title/abstract filter when you need hard keyword constraints.
 - Use `--require-near TERM_A TERM_B` to keep only records where the two terms appear within `--near-window` characters (default 120) of one another in the title/abstract. Repeat the flag for multiple pairs.
 - Required keywords automatically seed focused OpenAlex queries (AND pairs and grouped clauses), so you don’t need to hand-write matching `--extra-query` strings for core concepts.
 - Supply `--providers openalex crossref semantic_scholar serper_scholar core arxiv doaj` (default) or a custom subset to control which free indexes contribute results. When relying on Google Scholar only, combine `--providers serper_scholar` with extra queries to keep `query.max_results` fed while pagination walks additional pages; including `arxiv` or `openalex` unlocks their open-access hints so the downloader can grab PDFs without scraping.
