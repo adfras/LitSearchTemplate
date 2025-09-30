@@ -1,2 +1,4 @@
 pandas>=1.5
 requests>=2.31
+openai>=1.35
+pypdf>=4.2
