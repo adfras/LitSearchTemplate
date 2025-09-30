@@ -77,6 +77,7 @@ The orchestrator will:
 - Use `--require-near TERM_A TERM_B` to keep only records where the two terms appear within `--near-window` characters (default 120) of one another in the title/abstract. Repeat the flag for multiple pairs.
 - Required keywords automatically seed focused OpenAlex queries (AND pairs and grouped clauses), so you don’t need to hand-write matching `--extra-query` strings for core concepts.
 - Supply `--providers openalex crossref semantic_scholar serper_scholar core arxiv doaj` (default) or a custom subset to control which free indexes contribute results. When relying on Google Scholar only, combine `--providers serper_scholar` with extra queries to keep `query.max_results` fed while pagination walks additional pages; including `arxiv` or `openalex` unlocks their open-access hints so the downloader can grab PDFs without scraping.
+- Add `--provider-min-citations PROVIDER=N` to keep results from that provider only when they meet the given citation floor (e.g. `--provider-min-citations arxiv=10`). Repeat the flag for multiple providers; the global `--min-citations` still applies first.
 
 2. **Set bounds**
    - `--year-min`, `--year-max`, `--min-citations`, and `--top-n` mirror the JSON fields. CLI arguments win without permanently rewriting your custom plan.

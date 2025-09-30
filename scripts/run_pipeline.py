@@ -196,6 +196,7 @@ def _write_search_plan(
     extra_queries: Sequence[str],
     profile: str | None,
     providers: Sequence[str] | None,
+    provider_thresholds: dict[str, int] | None,
 ) -> Path:
     config = load_project_config(config_path)
     plan_path = config.search_plan
@@ -244,6 +245,8 @@ def _write_search_plan(
         "must_include_near": near_requirements,
         "providers": provider_list,
     }
+    if provider_thresholds:
+        plan["provider_min_citations"] = provider_thresholds
     plan_path.parent.mkdir(parents=True, exist_ok=True)
     plan_path.write_text(json.dumps(plan, indent=2), encoding="utf-8")
     return plan_path
@@ -351,6 +354,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--provider-min-citations",
+        action="append",
+        default=[],
+        metavar="PROVIDER=N",
+        help=(
+            "Optional provider-specific citation floors (e.g. arxiv=10). "
+            "Can be supplied multiple times."
+        ),
+    )
+    parser.add_argument(
         "--serper-rounds",
         type=int,
         default=3,
@@ -362,6 +375,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     top_n = args.top_n if args.top_n > 0 else None
 
     old_rows = _load_rows(load_project_config(args.config).csv_path)
+
+    provider_thresholds: dict[str, int] = {}
+    for item in args.provider_min_citations:
+        if not item or "=" not in item:
+            print(f"Ignoring invalid --provider-min-citations entry: {item}")
+            continue
+        provider, value = item.split("=", 1)
+        provider_clean = provider.strip().lower()
+        if not provider_clean:
+            continue
+        try:
+            provider_thresholds[provider_clean] = max(0, int(value))
+        except ValueError:
+            print(f"Ignoring invalid citation threshold '{value}' for provider '{provider}'.")
 
     plan_path = _write_search_plan(
         topic=args.topic,
@@ -376,6 +403,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         extra_queries=args.extra_query,
         profile=args.profile,
         providers=args.providers,
+        provider_thresholds=provider_thresholds or None,
     )
     print(f"Updated search plan at {plan_path}")
 

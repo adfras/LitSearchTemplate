@@ -67,6 +67,7 @@ class SearchPlan:
     sleep: float
     must_include: List[str]
     must_include_near: List[NearRequirement]
+    provider_min_citations: Dict[str, int]
 
 
 @dataclass
@@ -227,6 +228,18 @@ def _load_search_plan(path: Path | None) -> SearchPlan:
         must_include_near.append(NearRequirement(terms=cleaned, window=window))
     if not providers:
         providers = ["openalex"]
+    provider_thresholds_raw = data.get("provider_min_citations") or {}
+    provider_thresholds: Dict[str, int] = {}
+    if isinstance(provider_thresholds_raw, dict):
+        for key, value in provider_thresholds_raw.items():
+            key_clean = str(key).strip().lower()
+            if not key_clean:
+                continue
+            try:
+                provider_thresholds[key_clean] = max(0, int(value))
+            except Exception:  # noqa: BLE001
+                continue
+
     return SearchPlan(
         providers=providers,
         queries=queries,
@@ -237,6 +250,7 @@ def _load_search_plan(path: Path | None) -> SearchPlan:
         sleep=max(0.0, sleep),
         must_include=must_include,
         must_include_near=must_include_near,
+        provider_min_citations=provider_thresholds,
     )
 
 
@@ -954,6 +968,20 @@ def _apply_filters(plan: SearchPlan, records: Iterable[Record]) -> List[Record]:
             continue
         if record.cited_by_count < plan.min_citations:
             continue
+        if plan.provider_min_citations:
+            providers = {
+                (source.split(":", 1)[0] if ":" in source else source).strip().lower()
+                for source in record.source_queries
+                if isinstance(source, str)
+            }
+            skip = False
+            for provider in providers:
+                threshold = plan.provider_min_citations.get(provider)
+                if threshold is not None and record.cited_by_count < threshold:
+                    skip = True
+                    break
+            if skip:
+                continue
         if plan.must_include:
             haystack = f"{record.title} {record.abstract}".lower()
             if not all(term in haystack for term in plan.must_include):
