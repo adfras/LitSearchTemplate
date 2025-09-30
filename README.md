@@ -3,7 +3,7 @@
 Reusable tooling for harvesting, downloading, and citing literature for **any** research topic. The project abstracts the bespoke “Bayesian avatars” workflow into a configuration-driven engine that you can run end-to-end with a single command.
 
 - **Harvester**: Pulls ranked candidates from OpenAlex, Google Scholar (via Serper), and other configured providers using configurable query plans.
-- **Downloader**: Grabs deterministic open-access PDFs first, then fans out through Serper-driven search + scraping (no credentials stored in the repo).
+- **Downloader**: Grabs deterministic open-access PDFs and any direct links surfaced by OpenAlex/arXiv metadata before fanning out through Serper-driven search + scraping (no credentials stored in the repo).
 - **Citations**: Exports BibTeX/RIS for every DOI in the dataset.
 - **Orchestrator**: `python -m scripts.run_pipeline` updates the search plan, executes all stages, and prints a diff against the previous run.
 
@@ -76,7 +76,7 @@ The orchestrator will:
 - Add `--require TERM` flags to force keywords into the title/abstract filter. When omitted, the script injects "virtual reality" if the topic contains it.
 - Use `--require-near TERM_A TERM_B` to keep only records where the two terms appear within `--near-window` characters (default 120) of one another in the title/abstract. Repeat the flag for multiple pairs.
 - Required keywords automatically seed focused OpenAlex queries (AND pairs and grouped clauses), so you don’t need to hand-write matching `--extra-query` strings for core concepts.
-- Supply `--providers openalex crossref semantic_scholar serper_scholar core arxiv doaj` (default) or a custom subset to control which free indexes contribute results. When relying on Google Scholar only, combine `--providers serper_scholar` with extra queries to keep `query.max_results` fed while pagination walks additional pages.
+- Supply `--providers openalex crossref semantic_scholar serper_scholar core arxiv doaj` (default) or a custom subset to control which free indexes contribute results. When relying on Google Scholar only, combine `--providers serper_scholar` with extra queries to keep `query.max_results` fed while pagination walks additional pages; including `arxiv` or `openalex` unlocks their open-access hints so the downloader can grab PDFs without scraping.
 
 2. **Set bounds**
    - `--year-min`, `--year-max`, `--min-citations`, and `--top-n` mirror the JSON fields. CLI arguments win without permanently rewriting your custom plan.
@@ -107,7 +107,7 @@ Use `--dry-run` on the downloader scripts to preview actions without writing fil
 ## Tips & Troubleshooting
 
 - **Serper 403s** – Ensure `SERPER_API_KEY` is set; you can limit workload with `SERPER_MAX_ROWS` or the orchestrator’s `--serper-rounds`.
-- **Manual PDFs** – If some hosts require logins, obtain the PDF manually and drop it into `data/full_text/`. Re-run the Serper script to update the CSV metadata.
+- **Manual PDFs** – If some hosts require logins, obtain the PDF manually and drop it into `data/full_text/`. Re-run the downloaders to update the CSV metadata; any direct PDF links detected from provider metadata will now be attempted automatically before Serper searches.
 - **Profiles** – Add new templates to `PROFILES` in `scripts/run_pipeline.py` for frequently used queries/topics.
 - **ASCII cleanliness** – Titles/abstracts are normalised to plain ASCII in `collect_openalex.py` to avoid mojibake in downstream tools.
 

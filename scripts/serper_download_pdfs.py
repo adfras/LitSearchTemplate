@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import re
 import sys
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 import requests
+from urllib.parse import urlparse
 
 try:  # Allow running both as a module and as a script
     from .common import (
@@ -204,6 +206,7 @@ def _process_row(
     config,
     row: dict,
     column_titles: Tuple[str, str, str, str, str],
+    metadata: Optional[dict],
     delay_seconds: float,
     dry_run: bool,
 ) -> Optional[Tuple[str, Optional[str]]]:
@@ -214,6 +217,32 @@ def _process_row(
 
     if dest.exists():
         return _relative_to_root(dest, config.root_dir), None
+
+    candidate_urls: List[str] = []
+    if metadata and isinstance(metadata, dict):
+        for url in metadata.get("fulltext_urls") or []:
+            if isinstance(url, str) and url.strip():
+                candidate_urls.append(url.strip())
+        landing_meta = metadata.get("landing_page_url")
+        if isinstance(landing_meta, str) and landing_meta.strip() and _looks_like_pdf(landing_meta):
+            candidate_urls.append(landing_meta.strip())
+
+    landing_field = row.get("Landing Page URL")
+    if isinstance(landing_field, str) and landing_field.strip() and _looks_like_pdf(landing_field):
+        candidate_urls.append(landing_field.strip())
+
+    seen = set()
+    for url in candidate_urls:
+        if url in seen:
+            continue
+        seen.add(url)
+        print(f"  Attempting metadata {url}")
+        if dry_run:
+            return _relative_to_root(dest, config.root_dir), "metadata:dry-run"
+        saved_from = _download_pdf(session, url, dest)
+        if saved_from:
+            host = urlparse(saved_from).netloc or "metadata"
+            return _relative_to_root(dest, config.root_dir), f"metadata:{host}"
 
     for url in _candidate_urls(api_key, row, (doi_col, title_col), delay_seconds):
         pdf_url = url if _looks_like_pdf(url) else _find_pdf_in_page(session, url)
@@ -257,6 +286,16 @@ def main() -> int:
         rows = list(reader)
         fieldnames = reader.fieldnames or []
 
+    metadata_rows = []
+    dedup_path = csv_path.with_name(f"{csv_path.stem}_dedup.json")
+    if dedup_path.exists():
+        try:
+            metadata_rows = json.loads(dedup_path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            metadata_rows = []
+    if metadata_rows and len(metadata_rows) != len(rows):
+        metadata_rows = []
+
     column_titles: Tuple[str, str, str, str, str] = (
         config.columns.doi,
         config.columns.title,
@@ -283,6 +322,7 @@ def main() -> int:
             config,
             row,
             column_titles,
+            metadata_rows[index - 1] if metadata_rows else None,
             delay_seconds,
             args.dry_run,
         )
@@ -292,7 +332,10 @@ def main() -> int:
             row[column_titles[3]] = pdf_path
             existing = row.get(column_titles[4]) or ""
             extras: List[str] = []
-            if source_host and source_host != "dry-run":
+            if source_host and source_host.startswith("metadata:"):
+                host = source_host.split(":", 1)[1] if ":" in source_host else "metadata"
+                extras.append(f"Metadata ({host})")
+            elif source_host and source_host not in (None, "dry-run"):
                 extras.append(f"Serper ({source_host})")
             elif source_host == "dry-run":
                 extras.append("Serper (dry-run)")

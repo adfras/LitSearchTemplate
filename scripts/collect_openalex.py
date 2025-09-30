@@ -13,7 +13,7 @@ import time
 import unicodedata
 import xml.etree.ElementTree as ET
 from urllib.parse import quote_plus
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
@@ -81,6 +81,7 @@ class Record:
     authors: List[str]
     abstract: str
     source_queries: List[str]
+    fulltext_urls: List[str] = field(default_factory=list)
 
 
 def _sanitize_text(value: Optional[str]) -> str:
@@ -100,6 +101,11 @@ def _strip_html_tags(value: str) -> str:
     if not value:
         return ""
     return re.sub(r"<[^>]+>", " ", value)
+
+
+def _looks_like_pdf(url: str) -> bool:
+    lowered = url.lower()
+    return lowered.endswith(".pdf") or ".pdf?" in lowered or lowered.endswith(".pdf/")
 
 
 def _normalise_doi_value(doi: Optional[str]) -> Optional[str]:
@@ -122,12 +128,21 @@ def _create_record(
     authors: Iterable[str],
     abstract: str,
     source_label: str,
+    fulltext_urls: Iterable[str] | None = None,
 ) -> Record:
     doi_norm = _normalise_doi_value(doi)
     doi_url = None
     if doi_norm:
         doi_url = f"https://doi.org/{doi_norm}"
     author_list = [_sanitize_text(name) for name in authors if _sanitize_text(name)]
+    pdf_candidates: List[str] = []
+    if fulltext_urls:
+        for url in fulltext_urls:
+            cleaned = (url or "").strip()
+            if not cleaned:
+                continue
+            if cleaned not in pdf_candidates:
+                pdf_candidates.append(cleaned)
     return Record(
         record_id=record_id,
         doi=doi_norm,
@@ -139,6 +154,7 @@ def _create_record(
         authors=author_list,
         abstract=_sanitize_text(abstract),
         source_queries=[_sanitize_text(source_label) or source_label],
+        fulltext_urls=pdf_candidates,
     )
 
 
@@ -241,7 +257,7 @@ def _reconstruct_abstract(abstract_index: Optional[dict]) -> str:
     return " ".join(token for token in tokens if token)
 
 
-def _extract_record(raw: dict, label: str) -> Record:
+def _extract_record(raw: dict, label: str, fulltext_urls: Iterable[str] | None = None) -> Record:
     openalex_id = raw.get("id") or ""
     doi_value = raw.get("doi")
     title = _sanitize_text(raw.get("display_name") or raw.get("title") or "untitled")
@@ -267,6 +283,7 @@ def _extract_record(raw: dict, label: str) -> Record:
         authors=authors,
         abstract=abstract or "",
         source_label=f"openalex:{label}",
+        fulltext_urls=fulltext_urls,
     )
 
 
@@ -297,7 +314,37 @@ def _fetch_openalex(plan: SearchPlan, query: SearchQuery) -> List[Record]:
         data = _request_openalex(params)
         works = data.get("results") or []
         for item in works:
-            record = _extract_record(item, query.label)
+            primary = item.get("primary_location") or {}
+            pdf_urls: List[str] = []
+
+            def _add_pdf(url: Optional[str]) -> None:
+                if not url:
+                    return
+                cleaned = str(url).strip()
+                if not cleaned:
+                    return
+                if cleaned not in pdf_urls:
+                    pdf_urls.append(cleaned)
+
+            best_oa = item.get("best_oa_location") or {}
+            _add_pdf(primary.get("pdf_url"))
+            _add_pdf(best_oa.get("pdf_url"))
+
+            open_access = item.get("open_access") or {}
+            _add_pdf(open_access.get("oa_url"))
+
+            for location in item.get("locations") or []:
+                if isinstance(location, dict):
+                    _add_pdf(location.get("pdf_url"))
+                    landing = location.get("landing_page_url")
+                    if isinstance(landing, str) and _looks_like_pdf(landing):
+                        _add_pdf(landing)
+
+            landing_page = primary.get("landing_page_url")
+            if isinstance(landing_page, str) and _looks_like_pdf(landing_page):
+                _add_pdf(landing_page)
+
+            record = _extract_record(item, query.label, fulltext_urls=pdf_urls)
             results.append(record)
             fetched += 1
             if fetched >= query.max_results:
@@ -743,6 +790,7 @@ def _fetch_arxiv(plan: SearchPlan, query: SearchQuery) -> List[Record]:
                     authors=authors,
                     abstract=summary,
                     source_label=f"arxiv:{query.label}",
+                    fulltext_urls=[pdf_url] if pdf_url else None,
                 )
             )
         start += len(entries)
@@ -847,6 +895,10 @@ def _deduplicate(records: Iterable[Record]) -> List[Record]:
                 existing.landing_page_url = record.landing_page_url
             if not existing.doi_url and record.doi_url:
                 existing.doi_url = record.doi_url
+            if record.fulltext_urls:
+                for url in record.fulltext_urls:
+                    if url not in existing.fulltext_urls:
+                        existing.fulltext_urls.append(url)
             continue
         merged[key] = record
     return list(merged.values())
@@ -1051,6 +1103,7 @@ def main() -> int:
                 "authors": record.authors,
                 "abstract": record.abstract,
                 "source_queries": record.source_queries,
+                "fulltext_urls": record.fulltext_urls,
             }
             for record in all_records
         ],
@@ -1074,6 +1127,7 @@ def main() -> int:
                 "authors": record.authors,
                 "abstract": record.abstract,
                 "source_queries": record.source_queries,
+                "fulltext_urls": record.fulltext_urls,
             }
             for record in ordered
         ],

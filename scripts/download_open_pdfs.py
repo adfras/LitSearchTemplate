@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import sys
 from pathlib import Path
-from typing import Tuple
+from typing import List, Tuple
+
+from urllib.parse import urlparse
 
 import requests
 
@@ -69,6 +72,21 @@ def _relative_to_root(path: Path, root: Path) -> str:
         return str(path)
 
 
+def _looks_like_pdf(url: str) -> bool:
+    lowered = url.lower()
+    return lowered.endswith(".pdf") or ".pdf?" in lowered or lowered.endswith(".pdf/")
+
+
+def _load_metadata(csv_path: Path) -> List[dict]:
+    dedup_path = csv_path.with_name(f"{csv_path.stem}_dedup.json")
+    if not dedup_path.exists():
+        return []
+    try:
+        return json.loads(dedup_path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def main() -> int:
     args = _parse_args()
     config = load_project_config(args.config)
@@ -94,6 +112,10 @@ def main() -> int:
             return 1
         rows = list(reader)
 
+    metadata_rows = _load_metadata(csv_path)
+    if metadata_rows and len(metadata_rows) != len(rows):
+        metadata_rows = []
+
     column_titles: Tuple[str, str, str, str, str] = (
         config.columns.doi,
         config.columns.title,
@@ -107,7 +129,7 @@ def main() -> int:
 
     total = 0
     updated = 0
-    for row in rows:
+    for index, row in enumerate(rows):
         doi = (row.get(column_titles[0]) or "").strip()
         if not doi:
             continue
@@ -144,6 +166,70 @@ def main() -> int:
         notes = [text for text in (base_note, extra_note) if text]
         row[column_titles[4]] = "; ".join(dict.fromkeys(notes))
         updated += 1
+
+        if metadata_rows:
+            metadata_rows[index]["_downloaded_via"] = "sources"
+
+    for index, row in enumerate(rows):
+        status = (row.get(column_titles[2]) or "").strip().lower()
+        if status == "downloaded":
+            continue
+
+        metadata = metadata_rows[index] if metadata_rows and index < len(metadata_rows) else {}
+        title = (row.get(column_titles[1]) or row.get(column_titles[0]) or "untitled").strip()
+        dest = config.full_text_dir / f"{slugify(title)}.pdf"
+
+        if dest.exists():
+            row[column_titles[2]] = "downloaded"
+            row[column_titles[3]] = _relative_to_root(dest, config.root_dir)
+            continue
+
+        candidate_urls: List[str] = []
+        for url in (metadata.get("fulltext_urls") or []):
+            if isinstance(url, str) and url.strip():
+                candidate_urls.append(url.strip())
+
+        landing_meta = metadata.get("landing_page_url") if isinstance(metadata, dict) else None
+        landing_csv = row.get("Landing Page URL")
+        for maybe in (landing_meta, landing_csv):
+            if isinstance(maybe, str) and maybe.strip() and _looks_like_pdf(maybe):
+                candidate_urls.append(maybe.strip())
+
+        if not candidate_urls:
+            continue
+
+        seen: set[str] = set()
+        ordered_candidates: List[str] = []
+        for url in candidate_urls:
+            if url not in seen:
+                seen.add(url)
+                ordered_candidates.append(url)
+
+        for pdf_url in ordered_candidates:
+            print(f"Attempting metadata PDF {pdf_url}")
+            if args.dry_run:
+                row[column_titles[2]] = "downloaded"
+                row[column_titles[3]] = _relative_to_root(dest, config.root_dir)
+                note = row.get(column_titles[4]) or ""
+                additions = ["Metadata PDF (dry-run)", note]
+                row[column_titles[4]] = "; ".join(filter(None, dict.fromkeys(additions)))
+                total += 1
+                break
+            try:
+                _download_pdf(session, pdf_url, dest)
+            except Exception as exc:  # noqa: BLE001
+                print(f"  Failed metadata PDF: {exc}")
+                continue
+
+            row[column_titles[2]] = "downloaded"
+            row[column_titles[3]] = _relative_to_root(dest, config.root_dir)
+            existing_note = row.get(column_titles[4]) or ""
+            host = urlparse(pdf_url).netloc or "metadata"
+            parts = [f"Metadata ({host})", existing_note]
+            row[column_titles[4]] = "; ".join(filter(None, dict.fromkeys(parts)))
+            updated += 1
+            total += 1
+            break
 
     if args.dry_run:
         print("Dry run complete; no files written.")
